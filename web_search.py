@@ -18,8 +18,12 @@ Usage:
 """
 
 import time
+import warnings
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Suppress the package rename warning
+warnings.filterwarnings("ignore", message=".*has been renamed.*")
 
 # --- Dependencies ---
 try:
@@ -37,7 +41,7 @@ except ImportError:
     print("[web_search] trafilatura not installed. Run: pip install trafilatura")
 
 
-def search(query: str, max_results: int = 5, region: str = "wt-wt") -> list[dict]:
+def search(query: str, max_results: int = 5, region: str = "wt-wt", retries: int = 3) -> list[dict]:
     """
     Search the web using DuckDuckGo.
     
@@ -45,6 +49,7 @@ def search(query: str, max_results: int = 5, region: str = "wt-wt") -> list[dict
         query: Search query string
         max_results: Maximum number of results (default: 5)
         region: Region code (default: "wt-wt" for worldwide)
+        retries: Number of retry attempts (default: 3)
     
     Returns:
         List of dicts with keys: title, href, body
@@ -52,12 +57,25 @@ def search(query: str, max_results: int = 5, region: str = "wt-wt") -> list[dict
     if not HAS_DDGS:
         return [{"error": "duckduckgo-search not installed"}]
     
-    try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results, region=region))
-        return results
-    except Exception as e:
-        return [{"error": f"Search failed: {str(e)}"}]
+    for attempt in range(retries):
+        try:
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results, region=region))
+            
+            if results:
+                return results
+            
+            # Empty results, wait and retry
+            if attempt < retries - 1:
+                time.sleep(1 * (attempt + 1))
+                
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1 * (attempt + 1))
+            else:
+                return [{"error": f"Search failed: {str(e)}"}]
+    
+    return []
 
 
 def scrape(url: str, include_links: bool = False, timeout: int = 10) -> Optional[str]:
