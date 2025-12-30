@@ -2,3 +2,4 @@ FROM ./functiongemma-finetuned.gguf
 PARAMETER temperature 0.1
 PARAMETER stop "<end_of_turn>"
 PARAMETER stop "<end_function_call>"
+PARAMETER stop "<start_function_response>"
