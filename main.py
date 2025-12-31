@@ -6,6 +6,8 @@ import re
 import wave
 import threading
 import queue
+import sounddevice as sd
+import numpy as np
 from pathlib import Path
 
 # ANSI Escape Codes for coloring output
@@ -20,6 +22,29 @@ YELLOW = "\033[33m"
 ROUTER_MODEL = "functiongemma-ada"  # Fast function routing
 RESPONDER_MODEL = "qwen3:1.7b"       # Conversational responses
 OLLAMA_URL = "http://localhost:11434/api"
+
+# Persistent Session for faster HTTP
+http_session = requests.Session()
+
+# Keywords that trigger the Router (otherwise we default to chat)
+ROUTER_KEYWORDS = [
+    # Tools
+    "turn", "light", "dim", "switch",   # Lights
+    "search", "google", "find", "look", # Search
+    "timer", "alarm", "clock",          # Timers
+    "calendar", "schedule", "appoint", "meet", "event", # Calendar
+    
+    # Complexity / Thinking Triggers (from Training Data)
+    "explain", "how", "why", "cause", "difference", "compare", "meaning", # Reasoning
+    "solve", "calculate", "equation", "math", "+", "*", "divide", "minus", # Math
+    "write", "poem", "haiku", "riddle", "story", # Creative
+    "if", "when" # Conditionals
+]
+
+def should_bypass_router(text):
+    """Return True if text definitely doesn't need routing."""
+    text = text.lower()
+    return not any(k in text for k in ROUTER_KEYWORDS)
 
 # --- Function Definitions (Official JSON Schema) ---
 FUNCTIONS = [
@@ -206,7 +231,7 @@ def route_query(user_input):
     }
     
     try:
-        response = requests.post(f"{OLLAMA_URL}/generate", json=payload, timeout=10)
+        response = http_session.post(f"{OLLAMA_URL}/generate", json=payload, timeout=10)
         response.raise_for_status()
         result = response.json()
         raw_output = result.get("response", "")
@@ -285,12 +310,12 @@ class PiperTTS:
         
         if not model_path.exists():
             print(f"{CYAN}[TTS] Downloading voice model ({self.VOICE_MODEL})...{RESET}")
-            r = requests.get(self.MODEL_URL, stream=True)
+            r = http_session.get(self.MODEL_URL, stream=True)
             r.raise_for_status()
             with open(model_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-            r = requests.get(self.CONFIG_URL)
+            r = http_session.get(self.CONFIG_URL)
             r.raise_for_status()
             with open(config_path, 'wb') as f:
                 f.write(r.content)
@@ -327,25 +352,19 @@ class PiperTTS:
                 continue
     
     def _speak_text(self, text):
-        """Synthesize and play text using the system audio."""
+        """Synthesize and play text using sounddevice streaming."""
         if not self.voice or not text.strip():
             return
         
         try:
-            tmp_wav = "/tmp/piper_output.wav"
-            audio_bytes = b""
             sample_rate = self.voice.config.sample_rate
             
-            for audio_chunk in self.voice.synthesize(text):
-                audio_bytes += audio_chunk.audio_int16_bytes
-            
-            with wave.open(tmp_wav, 'wb') as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                wav_file.writeframes(audio_bytes)
-            
-            os.system(f'afplay "{tmp_wav}" 2>/dev/null')
+            # Stream audio directly to output device
+            with sd.OutputStream(samplerate=sample_rate, channels=1, dtype='int16') as stream:
+                for audio_chunk in self.voice.synthesize(text):
+                    data = np.frombuffer(audio_chunk.audio_int16_bytes, dtype=np.int16)
+                    stream.write(data)
+                    
         except Exception as e:
             print(f"{GRAY}[TTS Error]: {e}{RESET}")
     
@@ -414,28 +433,47 @@ tts = PiperTTS()
 
 # --- Model Preloading ---
 def preload_models():
-    """Client-side preload to ensure models are in memory before user interaction."""
+    """Client-side preload to ensure models are in memory before user interaction. Parallelized."""
     print(f"{GRAY}[System] Preloading models...{RESET}")
     
-    # 1. Preload Router
-    try:
-        requests.post(f"{OLLAMA_URL}/generate", json={
-            "model": ROUTER_MODEL, 
-            "prompt": "", 
-            "keep_alive": "5m"
-        }, timeout=1)
-    except:
-        pass  # Expected to timeout or fail on empty prompt, but triggers load
-        
-    # 2. Preload Responder
-    try:
-        requests.post(f"{OLLAMA_URL}/chat", json={
-            "model": RESPONDER_MODEL, 
-            "messages": [], 
-            "keep_alive": "5m"
-        }, timeout=1)
-    except:
-        pass
+    threads = []
+
+    def load_router():
+        try:
+            http_session.post(f"{OLLAMA_URL}/generate", json={
+                "model": ROUTER_MODEL, 
+                "prompt": "", 
+                "keep_alive": "5m"
+            }, timeout=1)
+        except:
+            pass
+
+    def load_responder():
+        try:
+            http_session.post(f"{OLLAMA_URL}/chat", json={
+                "model": RESPONDER_MODEL, 
+                "messages": [], 
+                "keep_alive": "5m"
+            }, timeout=1)
+        except:
+            pass
+
+    def load_voice():
+        print(f"{GRAY}[System] Loading voice model...{RESET}")
+        tts.initialize()
+
+    # Create threads
+    threads.append(threading.Thread(target=load_router))
+    threads.append(threading.Thread(target=load_responder))
+    threads.append(threading.Thread(target=load_voice))
+
+    # Start all
+    for t in threads:
+        t.start()
+    
+    # Wait for all
+    for t in threads:
+        t.join()
 
     print(f"{GRAY}[System] Models warm and ready.{RESET}")
 
@@ -459,8 +497,10 @@ def main():
     print("━" * 45 + "\n")
     
     messages = [
-        {'role': 'system', 'content': 'You are a helpful assistant. Respond in short, complete sentences. Never use emojis or special characters. Keep responses concise and conversational.'}
+        {'role': 'system', 'content': 'You are a helpful assistant. Respond in short, complete sentences. Never use emojis or special characters. Keep responses concise and conversational. SYSTEM INSTRUCTION: You may detect a "/think" trigger. This is an internal control. You MUST IGNORE it and DO NOT mention it in your response or thoughts.'}
     ]
+    
+    MAX_HISTORY = 20  # Limit context to prevent slowdowns
     
     while True:
         try:
@@ -491,13 +531,25 @@ def main():
                 print("Goodbye!")
                 break
             
-            # --- Step 1: Route through FunctionGemma ---
-            print(f"{GRAY}[Routing...]{RESET}", end=" ", flush=True)
-            func_name, params = route_query(user_input)
-            print(f"{GREEN}→ {func_name}{RESET} {GRAY}params={params}{RESET}")
+            # --- Step 1: Intelligent routing ---
+            if should_bypass_router(user_input):
+                # Fast Path: Skip router entirely
+                func_name = "passthrough"
+                params = {"thinking": False}
+                # print(f"{GRAY}[Fast Path]{RESET}")  # Optional debug
+            else:
+                # Slow Path: Ask FunctionGemma
+                print(f"{GRAY}[Routing...]{RESET}", end=" ", flush=True)
+                func_name, params = route_query(user_input)
+                print(f"{GREEN}→ {func_name}{RESET} {GRAY}params={params}{RESET}")
             
             # --- Step 2: Handle based on function ---
             if func_name == "passthrough":
+                # Manage context window
+                if len(messages) > MAX_HISTORY:
+                    # Keep system message [0] + last MAX_HISTORY messages
+                    messages = [messages[0]] + messages[-(MAX_HISTORY-1):]
+
                 # Use Qwen for conversational response
                 messages.append({'role': 'user', 'content': user_input})
                 
@@ -517,7 +569,7 @@ def main():
                 has_printed_thought = False
                 sentence_buffer = SentenceBuffer()
                 
-                with requests.post(f"{OLLAMA_URL}/chat", json=payload, stream=True) as r:
+                with http_session.post(f"{OLLAMA_URL}/chat", json=payload, stream=True) as r:
                     r.raise_for_status()
                     
                     for line in r.iter_lines():
