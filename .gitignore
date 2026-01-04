@@ -2,3 +2,6 @@ logs/
 functiongemma-finetuned/
 functiongemma-lora/
 functiongemma-merged/
+merged_model_adapter/
+functiongemma-270m-ft/
+merged_model/
