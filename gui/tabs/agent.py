@@ -21,13 +21,16 @@ from qfluentwidgets import (
     FluentIcon as FIF, InfoBar, InfoBarPosition
 )
 
+from gui.components.thinking_expander import ThinkingExpander
+
 
 class AgentSignals(QObject):
     """Signals for thread-safe GUI updates from agent."""
     screenshot_ready = Signal(bytes)
-    thought_ready = Signal(str)
+    thinking_chunk = Signal(str)  # Streaming thinking tokens
+    step_complete = Signal(str)   # Step summary (reasoning)
     status_ready = Signal(str)
-    action_ready = Signal(str)  # Action description
+    action_ready = Signal(str)    # Action description
     complete = Signal(str)
     error = Signal(str)
 
@@ -69,6 +72,7 @@ class AgentTab(QWidget):
         super().__init__()
         self.agent = None
         self.signals = AgentSignals()
+        self._current_thinking_expander = None  # Active thinking widget
         self._setup_ui()
         self._connect_signals()
     
@@ -184,7 +188,8 @@ class AgentTab(QWidget):
     def _connect_signals(self):
         """Connect agent signals to UI update slots."""
         self.signals.screenshot_ready.connect(self._update_screenshot)
-        self.signals.thought_ready.connect(self._add_thought)
+        self.signals.thinking_chunk.connect(self._on_thinking_chunk)
+        self.signals.step_complete.connect(self._on_step_complete)
         self.signals.status_ready.connect(self._update_status)
         self.signals.action_ready.connect(self._add_action)
         self.signals.complete.connect(self._on_complete)
@@ -206,17 +211,15 @@ class AgentTab(QWidget):
         self._clear_thoughts()
         
         # Import and create agent
-        from core.browser_agent import BrowserAgent
+        from core.agent import BrowserAgent
         
         self.agent = BrowserAgent()
         
         # Connect callbacks (using signals for thread safety)
         self.agent.on_screenshot = lambda data: self.signals.screenshot_ready.emit(data)
-        self.agent.on_thought = lambda text: self.signals.thought_ready.emit(text)
+        self.agent.on_thought = lambda text: self.signals.thinking_chunk.emit(text)
         self.agent.on_status = lambda text: self.signals.status_ready.emit(text)
-        self.agent.on_action = lambda action: self.signals.action_ready.emit(
-            f"{action.action_type.value}: {action.target}"
-        )
+        self.agent.on_action = lambda action: self._handle_action(action)
         self.agent.on_complete = lambda result: self.signals.complete.emit(result)
         self.agent.on_error = lambda err: self.signals.error.emit(err)
         
@@ -235,10 +238,30 @@ class AgentTab(QWidget):
     
     def _clear_thoughts(self):
         """Clear all thought items."""
+        self._current_thinking_expander = None
         while self.thoughts_layout.count() > 1:  # Keep the stretch
             item = self.thoughts_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+    
+    def _ensure_thinking_expander(self):
+        """Ensure we have a thinking expander for the current step."""
+        if not self._current_thinking_expander:
+            self._current_thinking_expander = ThinkingExpander()
+            self._current_thinking_expander.setVisible(True)
+            # Insert before the stretch
+            self.thoughts_layout.insertWidget(self.thoughts_layout.count() - 1, self._current_thinking_expander)
+        return self._current_thinking_expander
+    
+    def _handle_action(self, action):
+        """Handle action from agent - emits both step_complete and action_ready."""
+        # Complete the current thinking expander and emit step summary
+        if self._current_thinking_expander:
+            self._current_thinking_expander.complete()
+            self._current_thinking_expander = None
+        
+        # Emit action
+        self.signals.action_ready.emit(f"{action.action_type.value}: {action.target}")
     
     @Slot(bytes)
     def _update_screenshot(self, data: bytes):
@@ -255,15 +278,21 @@ class AgentTab(QWidget):
             self.screenshot_label.setPixmap(scaled)
     
     @Slot(str)
-    def _add_thought(self, text: str):
-        """Add a thought to the log."""
-        item = ThoughtItem(text, is_action=False)
-        # Insert before the stretch
-        self.thoughts_layout.insertWidget(self.thoughts_layout.count() - 1, item)
+    def _on_thinking_chunk(self, text: str):
+        """Stream thinking tokens to the ThinkingExpander."""
+        expander = self._ensure_thinking_expander()
+        expander.add_text(text)
         # Scroll to bottom
         self.thoughts_scroll.verticalScrollBar().setValue(
             self.thoughts_scroll.verticalScrollBar().maximum()
         )
+    
+    @Slot(str)
+    def _on_step_complete(self, text: str):
+        """Handle step completion - finalize current thinking."""
+        if self._current_thinking_expander:
+            self._current_thinking_expander.complete()
+            self._current_thinking_expander = None
     
     @Slot(str)
     def _add_action(self, text: str):

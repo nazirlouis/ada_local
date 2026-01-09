@@ -125,9 +125,18 @@ class MainWindow(FluentWindow):
         self.set_status("Ready")
     
     def _init_system_monitor(self):
-        """Add system monitor widget to the title bar."""
+        """Add system monitor widget to the title bar, centered with controls on the right."""
         self.system_monitor = SystemMonitor()
-        self.titleBar.hBoxLayout.insertWidget(4, self.system_monitor, 1)
+        
+        # Get the title bar layout
+        layout = self.titleBar.hBoxLayout
+        
+        # Insert a stretch to push monitor toward center (after title/icon, before buttons)
+        layout.insertStretch(4, 1)
+        # Insert the system monitor
+        layout.insertWidget(5, self.system_monitor, 0)
+        # Insert another stretch after monitor to balance centering
+        layout.insertStretch(6, 1)
     
     def _on_tab_changed(self, index):
         """Handle lazy loading when switching tabs."""
@@ -178,6 +187,13 @@ class MainWindow(FluentWindow):
     
     def scroll_to_bottom(self):
         if self.chat_tab: self.chat_tab.scroll_to_bottom()
+
+    def closeEvent(self, event):
+        """Handle application close event."""
+        print("[App] Closing application, unloading models...")
+        self.set_status("Closing...")
+        unload_all_models(sync=True)
+        event.accept()
 
 
 def create_app():
