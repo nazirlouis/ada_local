@@ -97,10 +97,21 @@ class MessageBubble(QFrame):
         self.setMinimumWidth(60)
         self.setMaximumWidth(600) # Slightly wider for code
     
-    def set_text(self, text: str):
+    def set_text(self, text: str, force_markdown: bool = True):
         """Update the message content (for streaming)."""
         self._text = text
         
+        # Optimization: Only render Markdown if there are potential markdown characters 
+        # or if explicitly forced (like when generation finishes).
+        # This avoids expensive regex/html conversion for every plain text token.
+        has_markdown = any(c in text for c in ['*', '`', '[', '#', '|', '-', '>'])
+        
+        if not force_markdown and not has_markdown:
+             # Fast path for plain text
+             self.content_label.setPlainText(text)
+             self.content_label.adjust_height()
+             return
+
         # Convert Markdown to HTML
         html_content = markdown.markdown(
             text, 
@@ -125,7 +136,8 @@ class MessageBubble(QFrame):
     def append_text(self, text: str):
         """Append text to the message (for streaming)."""
         self._text += text
-        self.set_text(self._text)
+        # For streaming, we use the optimized path
+        self.set_text(self._text, force_markdown=False)
     
     @property
     def alignment(self):

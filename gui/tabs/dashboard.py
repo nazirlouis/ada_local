@@ -231,15 +231,13 @@ class StatCard(CardWidget):
         layout.addStretch()
         
         # Right Side: Big Number
-        num = QLabel(str(count))
-        num.setStyleSheet("font-size: 28px; font-weight: bold; color: #e8eaed;")
-        num.setAlignment(Qt.AlignRight | Qt.AlignTop)
-        layout.addWidget(num)
+        self.num_label = QLabel(str(count))
+        self.num_label.setStyleSheet("font-size: 28px; font-weight: bold; color: #e8eaed;")
+        self.num_label.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        layout.addWidget(self.num_label)
 
     def set_count(self, count):
-        # find the label and update (simple version: rebuild or keep ref)
-        # Keeping it simple for static init, dynamic update would require saving ref
-        pass
+        self.num_label.setText(str(count))
 
 class HomeScenesCard(CardWidget):
     """
@@ -314,22 +312,27 @@ class IntelligenceItem(QFrame):
         col.setSpacing(4)
         
         top_line = QHBoxLayout()
-        t_lbl = StrongBodyLabel(title)
-        time_lbl = BodyLabel(time_str)
-        time_lbl.setStyleSheet("color: #6e7a8e; font-size: 11px;")
+        self.t_lbl = StrongBodyLabel(title)
+        self.time_lbl = BodyLabel(time_str)
+        self.time_lbl.setStyleSheet("color: #6e7a8e; font-size: 11px;")
         
-        top_line.addWidget(t_lbl)
+        top_line.addWidget(self.t_lbl)
         top_line.addStretch()
-        top_line.addWidget(time_lbl)
+        top_line.addWidget(self.time_lbl)
         
-        desc_lbl = BodyLabel(description)
-        desc_lbl.setStyleSheet("color: #8b9bb4; font-size: 12px;")
-        desc_lbl.setWordWrap(True)
+        self.desc_lbl = BodyLabel(description)
+        self.desc_lbl.setStyleSheet("color: #8b9bb4; font-size: 12px;")
+        self.desc_lbl.setWordWrap(True)
         
         col.addLayout(top_line)
-        col.addWidget(desc_lbl)
+        col.addWidget(self.desc_lbl)
         
         layout.addLayout(col)
+        
+    def update_content(self, title: str, description: str, time_str: str):
+        self.t_lbl.setText(title)
+        self.desc_lbl.setText(description)
+        self.time_lbl.setText(time_str)
 
 class IntelligenceFeed(CardWidget):
     """
@@ -360,16 +363,14 @@ class IntelligenceFeed(CardWidget):
         
         self.layout.addLayout(h_layout)
         
-        # Mock Items + Real News
-        # Using real data where possible
-        
-        # 1. Daily Focus (Mock logic for now)
-        self.layout.addWidget(IntelligenceItem(
-            FIF.TILES, # Fallback safe icon
+        # 1. Daily Focus
+        self.focus_item = IntelligenceItem(
+            FIF.TILES,
             "Daily Focus",
-            "You have a clear window between 2 PM and 4 PM. Suggested for 'Product Strategy'.",
-            "5M AGO"
-        ))
+            "Analyzing your schedule...",
+            "NOW"
+        )
+        self.layout.addWidget(self.focus_item)
         
         # Separator
         sep1 = QFrame()
@@ -377,23 +378,14 @@ class IntelligenceFeed(CardWidget):
         sep1.setStyleSheet("background-color: #1a2236;")
         self.layout.addWidget(sep1)
         
-        # 2. News (Real)
-        news = news_manager.get_briefing()
-        if news:
-            top = news[0]
-            self.layout.addWidget(IntelligenceItem(
-                FIF.WIFI, # News icon
-                "Intel Alert", # Source
-                top['title'],
-                "12M AGO"
-            ))
-        else:
-             self.layout.addWidget(IntelligenceItem(
-                FIF.WIFI, 
-                "Intel Alert",
-                "No active intelligence streams detected.",
-                "NOW"
-            ))
+        # 2. News (Intel Alert)
+        self.news_item = IntelligenceItem(
+            FIF.WIFI,
+            "Intel Alert",
+            "Syncing intelligence streams...",
+            "NOW"
+        )
+        self.layout.addWidget(self.news_item)
             
         # Separator
         sep2 = QFrame()
@@ -414,6 +406,13 @@ class IntelligenceFeed(CardWidget):
         # Upcoming Priority Card (Embedded at bottom)
         self.priority = PriorityCard()
         self.layout.addWidget(self.priority)
+
+    def update_news(self, news):
+        if news:
+            top = news[0]
+            self.news_item.update_content("Intel Alert", top['title'], "JUST NOW")
+        else:
+            self.news_item.update_content("Intel Alert", "No active intelligence streams detected.", "NOW")
 
 class PriorityCard(QFrame):
     """
@@ -478,6 +477,22 @@ class PriorityCard(QFrame):
             "starts_in": "45 minutes"
         }
 
+class DashboardLoader(QThread):
+    finished = Signal(dict)
+    
+    def run(self):
+        # Fetch tasks and news in background
+        try:
+            tasks = task_manager.get_tasks()
+            news = news_manager.get_briefing()
+            self.finished.emit({
+                "tasks": tasks,
+                "news": news
+            })
+        except Exception as e:
+            print(f"Dashboard loader error: {e}")
+            self.finished.emit({"tasks": [], "news": []})
+
 class DashboardView(QWidget):
     """
     The main 'System Intelligence' Dashboard.
@@ -503,16 +518,15 @@ class DashboardView(QWidget):
         left_col.setSpacing(20)
         
         # Stat 1: Planner
-        tasks_count = len([t for t in task_manager.get_tasks() if not t.get('completed')])
-        left_col.addWidget(StatCard(FIF.CALENDAR, "Planner Agenda", str(tasks_count)))
+        self.planner_stat = StatCard(FIF.CALENDAR, "Planner Agenda", "--")
+        left_col.addWidget(self.planner_stat)
         
         # Stat 2: Devices (Mock)
         left_col.addWidget(StatCard(FIF.CODE, "Active Devices", "3"))
         
         # Stat 3: Unread News
-        # Count available news
-        news_count = len(news_manager.get_briefing())
-        left_col.addWidget(StatCard(FIF.TILES, "Unread News", str(news_count)))
+        self.news_stat = StatCard(FIF.TILES, "Unread News", "--")
+        left_col.addWidget(self.news_stat)
         
         # Home Scenes
         left_col.addWidget(HomeScenesCard())
@@ -526,3 +540,25 @@ class DashboardView(QWidget):
         content_layout.addWidget(self.feed, 1)
         
         main_layout.addLayout(content_layout)
+        
+        # Trigger async load
+        QTimer.singleShot(100, self._start_loading)
+
+    def _start_loading(self):
+        # Prevent multiple loaders
+        if hasattr(self, 'loader') and self.loader and self.loader.isRunning():
+            return
+        self.loader = DashboardLoader(self)
+        self.loader.finished.connect(self._on_data_loaded)
+        self.loader.start()
+
+    def _on_data_loaded(self, data):
+        tasks = data.get("tasks", [])
+        news = data.get("news", [])
+        
+        # Update UI
+        active_tasks = [t for t in tasks if not t.get('completed')]
+        self.planner_stat.set_count(len(active_tasks))
+        self.news_stat.set_count(len(news))
+        
+        self.feed.update_news(news)

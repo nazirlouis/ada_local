@@ -1,8 +1,4 @@
-"""
-Event handlers for the Pocket AI GUI using PySide6 signals/slots.
-"""
-
-from PySide6.QtCore import QObject, Signal, QThread
+from PySide6.QtCore import QObject, Signal, QThread, QTimer
 import json
 import re
 
@@ -10,6 +6,7 @@ from config import RESPONDER_MODEL, OLLAMA_URL, MAX_HISTORY
 from core.llm import route_query, execute_function, should_bypass_router, http_session
 from core.tts import tts, SentenceBuffer
 from core.history import history_manager
+from core.model_manager import ensure_exclusive_qwen
 
 
 # DEBUG: Set to True to test streaming without TTS blocking
@@ -60,11 +57,15 @@ class ChatWorker(QObject):
                 self.ui_update.emit()
                 self.status.emit("Generating...")
                 
+                # Ensure only this Qwen model is running
+                ensure_exclusive_qwen(RESPONDER_MODEL)
+                
                 payload = {
                     "model": RESPONDER_MODEL,
                     "messages": self.messages,
                     "stream": True,
-                    "think": enable_thinking
+                    "think": enable_thinking,
+                    "keep_alive": "1m"
                 }
                 
                 sentence_buffer = SentenceBuffer()
@@ -134,7 +135,7 @@ class ChatHandlers(QObject):
     """Encapsulates all chat-related event handlers and state."""
     
     def __init__(self, main_window):
-        super().__init__()
+        super().__init__(main_window)
         self.main_window = main_window
         
         # State
@@ -151,8 +152,16 @@ class ChatHandlers(QObject):
             'response_bubble': None,
             'thinking_ui': None,
             'response_buffer': '',
-            'is_generating': False
+            'thought_buffer': '',
+            'is_generating': False,
+            'thinking_enabled': False
         }
+
+        # Throttling Timer for UI Updates
+        self.ui_throttle_timer = QTimer(self)
+        self.ui_throttle_timer.setInterval(100) # 10 tokens per second or so
+        self.ui_throttle_timer.timeout.connect(self._flush_ui_buffers)
+        self.last_scroll_time = 0
     
     def refresh_sidebar(self):
         """Reload the persistent sidebar with conversation history."""
@@ -214,19 +223,36 @@ class ChatHandlers(QObject):
         self.streaming_state['thinking_enabled'] = thinking_enabled
         if thinking_enabled and self.streaming_state['thinking_ui']:
             self.streaming_state['thinking_ui'].setVisible(True)
+        self.ui_throttle_timer.start()
 
     def _on_thought_chunk(self, text):
-        if self.streaming_state['thinking_ui']:
-            self.streaming_state['thinking_ui'].add_text(text)
+        self.streaming_state['thought_buffer'] += text
 
     def _on_response_chunk(self, text):
-        if self.streaming_state['response_bubble']:
-            self.streaming_state['response_buffer'] += text
-            self.streaming_state['response_bubble'].set_text(self.streaming_state['response_buffer'])
-            # Auto-scroll to show latest text
-            self.main_window.scroll_to_bottom()
+        self.streaming_state['response_buffer'] += text
             
+    def _flush_ui_buffers(self):
+        """Flush accumulated text to the UI components."""
+        updated = False
+        
+        # Update Thinking UI
+        if self.streaming_state['thought_buffer'] and self.streaming_state['thinking_ui']:
+            self.streaming_state['thinking_ui'].add_text(self.streaming_state['thought_buffer'])
+            self.streaming_state['thought_buffer'] = ''
+            updated = True
+            
+        # Update Response Bubble
+        if self.streaming_state['response_buffer'] and self.streaming_state['response_bubble']:
+            self.streaming_state['response_bubble'].append_text(self.streaming_state['response_buffer'])
+            self.streaming_state['response_buffer'] = ''
+            updated = True
+            
+        if updated:
+            self.main_window.scroll_to_bottom()
+
     def _on_think_end(self):
+        # Final flush
+        self._flush_ui_buffers()
         # Only mark complete if thinking was enabled
         if self.streaming_state.get('thinking_enabled') and self.streaming_state['thinking_ui']:
             self.streaming_state['thinking_ui'].complete()
@@ -245,6 +271,8 @@ class ChatHandlers(QObject):
         self.main_window.set_status(text)
 
     def _on_done(self):
+        self.ui_throttle_timer.stop()
+        self._flush_ui_buffers() # Final final flush
         self._end_generation_state()
     
     def _start_generation_state(self):
@@ -263,6 +291,7 @@ class ChatHandlers(QObject):
         if self.streaming_state['is_generating'] and self._stop_event:
             self._stop_event.set()
             self.main_window.set_status("Stopping...")
+            self.ui_throttle_timer.stop()
 
     def send_message(self, text: str):
         """Handle sending a new message."""
@@ -299,6 +328,7 @@ class ChatHandlers(QObject):
         self.streaming_state['thinking_ui'] = thinking_ui
         self.streaming_state['response_bubble'] = response_bubble
         self.streaming_state['response_buffer'] = ''
+        self.streaming_state['thought_buffer'] = ''
         self.streaming_state['thinking_enabled'] = False  # Will be set by think_start signal
         
         # Hide thinking UI initially - will be shown only if thinking is enabled
@@ -308,7 +338,7 @@ class ChatHandlers(QObject):
         self.main_window.add_streaming_widgets(thinking_ui, response_bubble)
 
         # Start background worker
-        self._thread = QThread()
+        self._thread = QThread(self)
         self._worker = ChatWorker(
             text, self.messages.copy(), self.is_tts_enabled,
             self.current_session_id, self._stop_event

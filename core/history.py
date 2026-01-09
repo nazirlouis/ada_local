@@ -9,11 +9,14 @@ DB_PATH = "chat_history.db"
 class ChatHistoryManager:
     def __init__(self, db_path: str = "data/chat_history.db"):
         self.db_path = db_path
+        # Ensure directory exists
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _init_db(self):
         """Initialize the database schema."""
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             
             # Sessions table
@@ -21,8 +24,8 @@ class ChatHistoryManager:
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 title TEXT,
-                created_at TIMESTAMP,
-                updated_at TIMESTAMP,
+                created_at TEXT,
+                updated_at TEXT,
                 pinned INTEGER DEFAULT 0
             )
             ''')
@@ -40,41 +43,50 @@ class ChatHistoryManager:
                 session_id TEXT,
                 role TEXT,
                 content TEXT,
-                timestamp TIMESTAMP,
+                timestamp TEXT,
                 FOREIGN KEY(session_id) REFERENCES sessions(id)
             )
             ''')
             
             conn.commit()
+        finally:
+            conn.close()
 
     def create_session(self, title="New Chat"):
         """Create a new chat session."""
         session_id = str(uuid.uuid4())
-        now = datetime.datetime.now()
+        now = datetime.datetime.now().isoformat()
         
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 'INSERT INTO sessions (id, title, created_at, updated_at, pinned) VALUES (?, ?, ?, ?, ?)',
                 (session_id, title, now, now, 0)
             )
             conn.commit()
+        finally:
+            conn.close()
         return session_id
 
     def update_session_title(self, session_id, title):
         """Update the title of a session."""
-        now = datetime.datetime.now()
-        with sqlite3.connect(self.db_path) as conn:
+        now = datetime.datetime.now().isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 'UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?',
                 (title, now, session_id)
             )
             conn.commit()
+        finally:
+            conn.close()
 
     def toggle_pin(self, session_id):
         """Toggle the pinned status of a session. Returns the new pinned state."""
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             
             # Get current pinned state
@@ -86,13 +98,15 @@ class ChatHistoryManager:
             # Update
             cursor.execute('UPDATE sessions SET pinned = ? WHERE id = ?', (new_pinned, session_id))
             conn.commit()
-        
-        return bool(new_pinned)
+            return bool(new_pinned)
+        finally:
+            conn.close()
 
     def add_message(self, session_id, role, content):
         """Add a message to a session."""
-        now = datetime.datetime.now()
-        with sqlite3.connect(self.db_path) as conn:
+        now = datetime.datetime.now().isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 'INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)',
@@ -104,21 +118,27 @@ class ChatHistoryManager:
                 (now, session_id)
             )
             conn.commit()
+        finally:
+            conn.close()
 
     def get_sessions(self):
         """Get all sessions, ordered by pinned first, then most recent update."""
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute('SELECT id, title, created_at, pinned FROM sessions ORDER BY pinned DESC, updated_at DESC')
             sessions = [
                 {'id': row[0], 'title': row[1], 'created_at': row[2], 'pinned': bool(row[3])}
                 for row in cursor.fetchall()
             ]
-        return sessions
+            return sessions
+        finally:
+            conn.close()
 
     def get_messages(self, session_id):
         """Get all messages for a session."""
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 'SELECT role, content FROM messages WHERE session_id = ? ORDER BY id ASC',
@@ -128,15 +148,20 @@ class ChatHistoryManager:
                 {'role': row[0], 'content': row[1]}
                 for row in cursor.fetchall()
             ]
-        return messages
+            return messages
+        finally:
+            conn.close()
 
     def delete_session(self, session_id):
         """Delete a session and all its messages."""
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM messages WHERE session_id = ?', (session_id,))
             cursor.execute('DELETE FROM sessions WHERE id = ?', (session_id,))
             conn.commit()
+        finally:
+            conn.close()
 
 # Global Instance
 history_manager = ChatHistoryManager()

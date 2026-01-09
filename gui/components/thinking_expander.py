@@ -115,7 +115,7 @@ class ThinkingExpander(QFrame):
         if self._animation:
             self._animation.stop()
             
-        self._animation = QPropertyAnimation(self.content_container, b"maximumHeight")
+        self._animation = QPropertyAnimation(self.content_container, b"maximumHeight", self)
         self._animation.setDuration(200)
         self._animation.setEasingCurve(QEasingCurve.OutCubic)
         self._animation.setStartValue(self.content_container.maximumHeight())

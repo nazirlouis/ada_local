@@ -60,3 +60,24 @@ def get_running_models() -> list:
     except:
         pass
     return []
+
+
+def ensure_exclusive_qwen(target_model: str):
+    """
+    Ensure that no other Qwen models are running except for the target.
+    Helpful for VRAM constrained systems.
+    """
+    try:
+        running = get_running_models()
+        # Find all qwen models that aren't the target
+        # Note: Ollama model names might have tags, so we check for 'qwen' in name
+        to_unload = [
+            m for m in running 
+            if "qwen" in m.lower() and m != target_model and not target_model.startswith(m)
+        ]
+        
+        for m in to_unload:
+            unload_model(m)
+            
+    except Exception as e:
+        print(f"{GRAY}[ModelManager] Error in exclusion logic: {e}{RESET}")

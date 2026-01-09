@@ -24,10 +24,18 @@ def should_bypass_router(text):
 
 
 def route_query(user_input):
-    """Route user query using local FunctionGemmaRouter."""
+    """Route user query using local FunctionGemmaRouter. Lazy loads the router on first use."""
     global router
+    
+    # Lazy Initialization
     if not router:
-        return "passthrough", {"thinking": False}
+        try:
+            from core.router import FunctionGemmaRouter
+            # We load without compilation for faster initialization and stability
+            router = FunctionGemmaRouter(model_path=LOCAL_ROUTER_PATH, compile_model=False)
+        except Exception as e:
+            print(f"{GRAY}[Router Init Error: {e}]{RESET}")
+            return "passthrough", {"thinking": False}
 
     try:
         # Route using the fine-tuned model (thinking vs nonthinking)
@@ -106,7 +114,7 @@ def preload_models():
             http_session.post(f"{OLLAMA_URL}/chat", json={
                 "model": RESPONDER_MODEL, 
                 "messages": [], 
-                "keep_alive": "5m"
+                "keep_alive": "1m"
             }, timeout=1)
         except:
             pass

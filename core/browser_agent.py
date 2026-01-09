@@ -23,6 +23,7 @@ import requests
 from playwright.async_api import async_playwright, Page, Browser
 
 from config import OLLAMA_URL, GRAY, RESET
+from core.model_manager import ensure_exclusive_qwen
 
 
 # --- Configuration ---
@@ -138,6 +139,9 @@ Respond with ONLY the JSON, no other text."""
             if DEBUG_VLM:
                 print(f"[DEBUG] Sending request to {OLLAMA_URL}/chat with model {AGENT_VLM_MODEL}")
                 print(f"[DEBUG] Screenshot size: {len(screenshot_b64)} bytes (base64)")
+            
+            # Ensure only this Qwen model is running
+            ensure_exclusive_qwen(AGENT_VLM_MODEL)
             
             response = requests.post(
                 f"{OLLAMA_URL}/chat",
