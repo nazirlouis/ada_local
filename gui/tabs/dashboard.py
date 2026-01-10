@@ -190,11 +190,16 @@ class WeatherWorker(QThread):
 class StatCard(CardWidget):
     """
     Square/Rectangular card for quick stats (Agenda, Devices, etc).
+    Clickable - emits clicked signal with route_key for navigation.
     """
-    def __init__(self, icon: FIF, title: str, count: str, parent=None):
+    clicked = Signal(str)
+    
+    def __init__(self, icon: FIF, title: str, count: str, route_key: str = None, parent=None):
         super().__init__(parent)
         self.setFixedSize(280, 110)
         self.setBorderRadius(16)
+        self.route_key = route_key
+        self.setCursor(Qt.PointingHandCursor) if route_key else None
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(20, 20, 25, 20)
@@ -240,6 +245,11 @@ class StatCard(CardWidget):
 
     def set_count(self, count):
         self.num_label.setText(str(count))
+    
+    def mousePressEvent(self, event):
+        super().mousePressEvent(event)
+        if self.route_key:
+            self.clicked.emit(self.route_key)
 
 class HomeScenesCard(CardWidget):
     """
@@ -312,12 +322,25 @@ class HomeScenesCard(CardWidget):
                 super().__init__()
                 self.func = func
             def run(self):
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self.func())
-                loop.close()
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.func())
+                    loop.close()
+                except Exception as e:
+                    print(f"Scene action error: {e}")
+        
+        # Wait for any previous thread to finish (with safety check)
+        try:
+            if self._action_thread is not None and self._action_thread.isRunning():
+                self._action_thread.wait()
+        except RuntimeError:
+            # C++ object already deleted, that's fine
+            pass
         
         self._action_thread = SceneThread(action_func)
+        # Clear our reference when finished to avoid stale reference issues
+        self._action_thread.finished.connect(lambda: setattr(self, '_action_thread', None))
         self._action_thread.start()
     
     async def _focus_action(self):
@@ -597,17 +620,20 @@ class DashboardLoader(QThread):
             # Fetch Kasa devices
             devices = []
             try:
+                print("[Dashboard] Starting Kasa device discovery...")
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
                 devices = loop.run_until_complete(kasa_manager.discover_devices())
                 loop.close()
+                print(f"[Dashboard] Found {len(devices)} devices")
             except Exception as e:
-                print(f"Kasa discovery error: {e}")
+                print(f"[Dashboard] Kasa discovery error: {e}")
             
             # Fetch today's calendar events
             today_str = datetime.now().strftime("%Y-%m-%d")
             events = calendar_manager.get_events(today_str)
             
+            print("[Dashboard] Data loading complete, emitting signal")
             self.finished.emit({
                 "tasks": tasks,
                 "news": news,
@@ -615,13 +641,16 @@ class DashboardLoader(QThread):
                 "events": events
             })
         except Exception as e:
-            print(f"Dashboard loader error: {e}")
+            print(f"[Dashboard] Loader error: {e}")
             self.finished.emit({"tasks": [], "news": [], "devices": [], "events": []})
 
 class DashboardView(QWidget):
     """
     The main 'System Intelligence' Dashboard.
+    Emits navigate_to signal when user clicks on a stat card to go to that tab.
     """
+    navigate_to = Signal(str)  # Emits the route key (e.g., "plannerInterface")
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("dashboardView")
@@ -642,16 +671,19 @@ class DashboardView(QWidget):
         left_col = QVBoxLayout()
         left_col.setSpacing(20)
         
-        # Stat 1: Planner
-        self.planner_stat = StatCard(FIF.CALENDAR, "Planner Agenda", "--")
+        # Stat 1: Planner - navigates to plannerInterface
+        self.planner_stat = StatCard(FIF.CALENDAR, "Planner Agenda", "--", "plannerInterface")
+        self.planner_stat.clicked.connect(self._on_navigate)
         left_col.addWidget(self.planner_stat)
         
-        # Stat 2: Devices (Live from Kasa)
-        self.devices_stat = StatCard(FIF.IOT, "Active Devices", "--")
+        # Stat 2: Devices - navigates to homeInterface
+        self.devices_stat = StatCard(FIF.IOT, "Active Devices", "--", "homeInterface")
+        self.devices_stat.clicked.connect(self._on_navigate)
         left_col.addWidget(self.devices_stat)
         
-        # Stat 3: Unread News
-        self.news_stat = StatCard(FIF.TILES, "Unread News", "--")
+        # Stat 3: Unread News - navigates to briefingInterface
+        self.news_stat = StatCard(FIF.TILES, "Unread News", "--", "briefingInterface")
+        self.news_stat.clicked.connect(self._on_navigate)
         left_col.addWidget(self.news_stat)
         
         # Home Scenes
@@ -670,16 +702,18 @@ class DashboardView(QWidget):
         
         # Store devices for scene control
         self._devices = []
+        self.loader = None
         
         # Trigger async load
         QTimer.singleShot(100, self._start_loading)
 
     def _start_loading(self):
         # Prevent multiple loaders
-        if hasattr(self, 'loader') and self.loader and self.loader.isRunning():
+        if self.loader and self.loader.isRunning():
             return
         self.loader = DashboardLoader(self)
         self.loader.finished.connect(self._on_data_loaded)
+        self.loader.finished.connect(self.loader.deleteLater)
         self.loader.start()
 
     def _on_data_loaded(self, data):
@@ -705,3 +739,7 @@ class DashboardView(QWidget):
         
         # Update priority card with calendar events
         self.feed.priority.update_event(events)
+    
+    def _on_navigate(self, route_key: str):
+        """Emit navigation signal when a stat card is clicked."""
+        self.navigate_to.emit(route_key)

@@ -76,7 +76,8 @@ class MainWindow(FluentWindow):
         # Dashboard is loaded immediately as it's the home screen
         self.dashboard_view = DashboardView()
         self.dashboard_view.setObjectName("dashboardInterface")
-        self.addSubInterface(self.dashboard_view, FIF.HOME, "Dashboard")
+        self.dashboard_view.navigate_to.connect(self._navigate_to_tab)
+        self.addSubInterface(self.dashboard_view, FIF.LAYOUT, "Dashboard")
 
         # Lazy load other tabs
         self.chat_lazy = LazyTab(ChatTab, "chatInterface")
@@ -91,7 +92,7 @@ class MainWindow(FluentWindow):
         self.addSubInterface(self.chat_lazy, FIF.CHAT, "Chat")
         self.addSubInterface(self.planner_lazy, FIF.CALENDAR, "Planner")
         self.addSubInterface(self.briefing_view, FIF.DATE_TIME, "Briefing")
-        self.addSubInterface(self.home_lazy, FIF.LAYOUT, "Home Auto")
+        self.addSubInterface(self.home_lazy, FIF.HOME, "Home Auto")
         self.addSubInterface(self.browser_lazy, FIF.GLOBE, "Web Agent")
         
         # Settings at bottom
@@ -174,6 +175,14 @@ class MainWindow(FluentWindow):
                 pass
                 
         self.set_status("Ready")
+    
+    def _navigate_to_tab(self, route_key: str):
+        """Navigate to a tab by its object name (route key)."""
+        for i in range(self.stackedWidget.count()):
+            widget = self.stackedWidget.widget(i)
+            if widget.objectName() == route_key:
+                self.switchTo(widget)
+                return
     
     # --- Public Methods for Handlers (Proxy/Facade) ---
     # These now check if the tab exists before calling

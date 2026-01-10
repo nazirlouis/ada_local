@@ -18,11 +18,17 @@ class DataFetchThread(QThread):
     
     def run(self):
         # Run async discovery in a synchronous wrapper
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        devices = loop.run_until_complete(kasa_manager.discover_devices())
-        loop.close()
-        self.devices_found.emit(devices)
+        try:
+            print("[HomeAutomation] Starting Kasa device discovery...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            devices = loop.run_until_complete(kasa_manager.discover_devices())
+            loop.close()
+            print(f"[HomeAutomation] Found {len(devices)} devices")
+            self.devices_found.emit(devices)
+        except Exception as e:
+            print(f"[HomeAutomation] Discovery error: {e}")
+            self.devices_found.emit([])
 
 class ActionThread(QThread):
     finished = Signal(bool)
@@ -33,18 +39,23 @@ class ActionThread(QThread):
         self.args = args
         
     def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        if self.action == "on":
-            success = loop.run_until_complete(kasa_manager.turn_on(*self.args))
-        elif self.action == "off":
-            success = loop.run_until_complete(kasa_manager.turn_off(*self.args))
-        elif self.action == "brightness":
-            success = loop.run_until_complete(kasa_manager.set_brightness(*self.args))
-        elif self.action == "color":
-            success = loop.run_until_complete(kasa_manager.set_hsv(*self.args))
-        loop.close()
-        self.finished.emit(success)
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            success = False
+            if self.action == "on":
+                success = loop.run_until_complete(kasa_manager.turn_on(*self.args))
+            elif self.action == "off":
+                success = loop.run_until_complete(kasa_manager.turn_off(*self.args))
+            elif self.action == "brightness":
+                success = loop.run_until_complete(kasa_manager.set_brightness(*self.args))
+            elif self.action == "color":
+                success = loop.run_until_complete(kasa_manager.set_hsv(*self.args))
+            loop.close()
+            self.finished.emit(success)
+        except Exception as e:
+            print(f"[HomeAutomation] Action '{self.action}' error: {e}")
+            self.finished.emit(False)
 
 class DeviceCard(QFrame):
     """
@@ -314,9 +325,14 @@ class HomeAutomationTab(QWidget):
                 row += 1
 
     def _load_devices(self):
-        # Spinner or loading text could go here
+        # Skip if already loading
+        if hasattr(self, 'loader') and self.loader and self.loader.isRunning():
+            print("[HomeAutomation] Skipping - discovery already in progress")
+            return
+            
         self.loader = DataFetchThread()
         self.loader.devices_found.connect(self._on_devices_loaded)
+        self.loader.finished.connect(self.loader.deleteLater)
         self.loader.start()
         
     def _on_devices_loaded(self, devices):
