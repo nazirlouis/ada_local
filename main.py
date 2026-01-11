@@ -2,7 +2,13 @@
 Pocket AI - Main Entry Point
 """
 
+import warnings
 import sys
+
+# Suppress ALL warnings globally before any other imports
+# This is aggressive but ensures clean console output
+warnings.simplefilter("ignore")
+
 from PySide6.QtCore import QSize
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QFont, QColor, QIcon

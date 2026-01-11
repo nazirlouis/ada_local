@@ -195,6 +195,10 @@ class AlarmComponent(QWidget):
         alarms = task_manager.get_alarms()
         for a in alarms:
             self._create_alarm_item(a)
+    
+    def reload(self):
+        """Reload alarms from database. Called externally after voice command."""
+        self._load_alarms()
 
     def _create_alarm_item(self, alarm):
         item = QListWidgetItem()

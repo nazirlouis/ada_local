@@ -74,6 +74,9 @@ class MainWindow(FluentWindow):
         self.planner_tab = None
         self.briefing_view = None
         self.home_tab = None
+        
+        # Flag to prevent duplicate signal connections
+        self._chat_signals_connected = False
 
         self._init_window()
         self._connect_signals()
@@ -121,8 +124,9 @@ class MainWindow(FluentWindow):
 
     def _connect_chat_signals(self):
         """Connect ChatTab signals (called when ChatTab is initialized)."""
-        if not self.chat_tab:
+        if not self.chat_tab or self._chat_signals_connected:
             return
+        self._chat_signals_connected = True
         self.chat_tab.new_chat_requested.connect(self.handlers.clear_chat)
         self.chat_tab.send_message_requested.connect(self._on_send)
         self.chat_tab.stop_generation_requested.connect(self.handlers.stop_generation)

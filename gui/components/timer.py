@@ -150,6 +150,18 @@ class TimerComponent(QWidget):
         self.start_btn.setText("START")
         self.remaining = self.duration
         self._update_display()
+    
+    def set_and_start(self, seconds: int, label: str = None):
+        """Set timer duration and start it. Called externally (e.g., voice command)."""
+        if seconds <= 0:
+            return
+        self.duration = seconds
+        self.remaining = seconds
+        self._update_display()
+        # Auto-start
+        self.timer.start()
+        self.start_btn.setText("PAUSE")
+        self.is_running = True
 
     def _edit_duration(self):
         from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QSpinBox, QLabel, QPushButton

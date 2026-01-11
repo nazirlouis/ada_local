@@ -220,15 +220,32 @@ class FunctionGemmaRouter:
         if func_name == "get_system_info":
             return {}
         
-        # Try to parse JSON arguments from response
-        # Look for pattern like {"key": "value", ...}
-        json_match = re.search(r'\{[^{}]+\}', response)
-        if json_match:
-            try:
-                args = json.loads(json_match.group())
+        # Parse the model's custom format: {key:<escape>value<escape>,key2:<escape>value2<escape>}
+        # Find the arguments block after the function name
+        pattern = rf"call:{func_name}\{{([^}}]+)\}}"
+        match = re.search(pattern, response)
+        
+        if match:
+            args_str = match.group(1)
+            args = {}
+            
+            # Split by comma, but handle values with commas inside <escape> tags
+            # Pattern: key:<escape>value<escape>
+            arg_pattern = r'(\w+):<escape>([^<]*)<escape>'
+            for arg_match in re.finditer(arg_pattern, args_str):
+                key = arg_match.group(1)
+                value = arg_match.group(2)
+                
+                # Try to convert to appropriate type
+                if value.isdigit():
+                    args[key] = int(value)
+                elif value.lower() in ('true', 'false'):
+                    args[key] = value.lower() == 'true'
+                else:
+                    args[key] = value
+            
+            if args:
                 return args
-            except json.JSONDecodeError:
-                pass
         
         # Fallback: return user prompt as main argument
         if func_name == "control_light":

@@ -35,21 +35,17 @@ def route_query(user_input):
             router = FunctionGemmaRouter(model_path=LOCAL_ROUTER_PATH, compile_model=False)
         except Exception as e:
             print(f"{GRAY}[Router Init Error: {e}]{RESET}")
-            return "passthrough", {"thinking": False}
+            return "nonthinking", {"prompt": user_input}
 
     try:
-        # Route using the fine-tuned model (thinking vs nonthinking)
-        decision, elapsed = router.route_with_timing(user_input)
-        
-        # Map to passthrough params
-        if decision == "thinking":
-            return "passthrough", {"thinking": True, "router_latency": elapsed}
-        else:  # nonthinking
-            return "passthrough", {"thinking": False, "router_latency": elapsed}
+        # Route using the fine-tuned model - returns (func_name, params)
+        (func_name, params), elapsed = router.route_with_timing(user_input)
+        # Timing info available: elapsed*1000 ms
+        return func_name, params
             
     except Exception as e:
         print(f"{GRAY}[Router Error: {e}]{RESET}")
-        return "passthrough", {"thinking": False, "router_latency": 0.0}
+        return "nonthinking", {"prompt": user_input}
 
 
 def execute_function(name, params):

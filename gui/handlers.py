@@ -3,11 +3,15 @@ import json
 import re
 
 from config import RESPONDER_MODEL, OLLAMA_URL, MAX_HISTORY
-from core.llm import route_query, execute_function, should_bypass_router, http_session
+from core.llm import route_query, should_bypass_router, http_session
 from core.tts import tts, SentenceBuffer
 from core.history import history_manager
 from core.model_manager import ensure_exclusive_qwen
 from core.settings_store import settings as app_settings
+from core.function_executor import executor as function_executor
+
+# Functions that are actions (not passthrough)
+ACTION_FUNCTIONS = {"control_light", "set_timer", "set_alarm", "create_calendar_event", "add_task", "web_search"}
 
 
 # DEBUG: Set to True to test streaming without TTS blocking
@@ -27,6 +31,9 @@ class ChatWorker(QObject):
     status = Signal(str)
     done = Signal()
     ui_update = Signal()
+    toast = Signal(str, bool)  # message, success
+    set_timer_signal = Signal(int, str)  # seconds, label
+    reload_alarms = Signal()  # trigger alarm list reload
     
     def __init__(self, user_text: str, messages: list, is_tts_enabled: bool, 
                  current_session_id: str, stop_event):
@@ -42,99 +49,214 @@ class ChatWorker(QObject):
         """Background processing method."""
         try:
             if should_bypass_router(self.user_text):
-                func_name = "passthrough"
-                params = {"thinking": False}
+                func_name = "nonthinking"
+                params = {"prompt": self.user_text}
             else:
                 self.status.emit("Routing...")
                 func_name, params = route_query(self.user_text)
             
-            if func_name == "passthrough":
-                max_hist = app_settings.get("general.max_history", MAX_HISTORY)
-                if len(self.messages) > max_hist:
-                    self.messages = [self.messages[0]] + self.messages[-(max_hist-1):]
+            # Handle action functions
+            if func_name in ACTION_FUNCTIONS:
+                self.status.emit(f"Executing {func_name}...")
+                result = function_executor.execute(func_name, params)
                 
-                self.messages.append({'role': 'user', 'content': self.user_text})
-                enable_thinking = params.get("thinking", False)
+                # Emit toast notification
+                self.toast.emit(result["message"], result["success"])
                 
-                self.ui_update.emit()
-                self.status.emit("Generating...")
+                # Emit GUI update signals for specific actions
+                if func_name == "set_timer" and result["success"]:
+                    seconds = result.get("data", {}).get("seconds", 0)
+                    label = result.get("data", {}).get("label", "Timer")
+                    self.set_timer_signal.emit(seconds, label)
+                elif func_name == "set_alarm" and result["success"]:
+                    self.reload_alarms.emit()
                 
-                # Ensure only this Qwen model is running
-                model = app_settings.get("models.chat", RESPONDER_MODEL)
-                ensure_exclusive_qwen(model)
+                # Generate Qwen response with context
+                self._generate_response_with_context(func_name, result)
                 
-                # Get Ollama URL from settings
-                ollama_url = app_settings.get("ollama_url", OLLAMA_URL)
+            # Handle get_system_info (context query)
+            elif func_name == "get_system_info":
+                self.status.emit("Gathering system info...")
+                result = function_executor.execute(func_name, params)
                 
-                payload = {
-                    "model": model,
-                    "messages": self.messages,
-                    "stream": True,
-                    "think": enable_thinking,
-                    "keep_alive": "1m"
-                }
-                
-                sentence_buffer = SentenceBuffer()
-                self.full_response = ""
-                
-                # Only emit think_start with True if thinking is enabled
-                self.think_start.emit(enable_thinking)
-
-                with http_session.post(f"{ollama_url}/api/chat", json=payload, stream=True) as r:
-                    r.raise_for_status()
-                    
-                    for line in r.iter_lines():
-                        if self.stop_event.is_set():
-                            break
-                            
-                        if line:
-                            try:
-                                chunk = json.loads(line.decode('utf-8'))
-                                msg = chunk.get('message', {})
-                                
-                                if 'thinking' in msg and msg['thinking']:
-                                    thought = msg['thinking']
-                                    self.thought_chunk.emit(thought)
-                                    
-                                if 'content' in msg and msg['content']:
-                                    content = msg['content']
-                                    self.full_response += content
-                                    self.response_chunk.emit(content)
-                                    
-                                    if self.is_tts_enabled and not DEBUG_SKIP_TTS:
-                                        sentences = sentence_buffer.add(content)
-                                        for s in sentences:
-                                            tts.queue_sentence(s)
-                                            
-                            except:
-                                continue
-                
-                self.think_end.emit()
-                
-                if self.is_tts_enabled and not DEBUG_SKIP_TTS and not self.stop_event.is_set():
-                    rem = sentence_buffer.flush()
-                    if rem:
-                        tts.queue_sentence(rem)
-                
-                self.messages.append({'role': 'assistant', 'content': self.full_response})
-                
-                # Save to History
-                if self.current_session_id:
-                    history_manager.add_message(self.current_session_id, "assistant", self.full_response)
-
+                # Generate Qwen response with full system context
+                self._generate_response_with_context(func_name, result)
+            
+            # Handle thinking/nonthinking (direct passthrough)
+            elif func_name in ("thinking", "nonthinking"):
+                enable_thinking = (func_name == "thinking")
+                self._stream_qwen_response(enable_thinking)
+            
+            # Unknown function - treat as nonthinking
             else:
-                result = execute_function(func_name, params)
-                self.simple_response.emit(result)
-
-                if self.is_tts_enabled:
-                    clean = re.sub(r'[^\w\s.,!?-]', '', result)
-                    tts.queue_sentence(clean)
+                self._stream_qwen_response(False)
 
         except Exception as e:
             self.error.emit(str(e))
         
         finally:
             self.done.emit()
+    
+    def _generate_response_with_context(self, func_name: str, result: dict):
+        """Generate a Qwen response with function result as context."""
+        # Build system message with context
+        if func_name == "get_system_info" and result.get("success"):
+            data = result.get("data", {})
+            context_parts = []
+            
+            if data.get("timers"):
+                context_parts.append(f"Active timers: {data['timers']}")
+            if data.get("alarms"):
+                context_parts.append(f"Alarms: {data['alarms']}")
+            if data.get("calendar_today"):
+                context_parts.append(f"Today's events: {data['calendar_today']}")
+            if data.get("tasks"):
+                pending = [t for t in data['tasks'] if not t.get('completed')]
+                context_parts.append(f"Pending tasks: {len(pending)} items")
+            if data.get("smart_devices"):
+                on_devices = [d['name'] for d in data['smart_devices'] if d.get('is_on')]
+                context_parts.append(f"Devices on: {on_devices if on_devices else 'none'}")
+            if data.get("weather"):
+                w = data['weather']
+                context_parts.append(f"Weather: {w.get('temp')}°F, {w.get('condition')}")
+            
+            context_msg = "SYSTEM CONTEXT:\n" + "\n".join(context_parts) if context_parts else ""
+        else:
+            # Action function result
+            status = "succeeded" if result.get("success") else "failed"
+            context_msg = f"ACTION RESULT: {func_name} {status}. {result.get('message', '')}"
+        
+        # Prepare messages with context
+        max_hist = app_settings.get("general.max_history", MAX_HISTORY)
+        if len(self.messages) > max_hist:
+            self.messages = [self.messages[0]] + self.messages[-(max_hist-1):]
+        
+        # Add context as system message and user's original question
+        context_prompt = f"{context_msg}\n\nUser asked: {self.user_text}\n\nRespond naturally and concisely."
+        self.messages.append({'role': 'user', 'content': context_prompt})
+        
+        self.ui_update.emit()
+        self.status.emit("Generating response...")
+        
+        model = app_settings.get("models.chat", RESPONDER_MODEL)
+        ensure_exclusive_qwen(model)
+        ollama_url = app_settings.get("ollama_url", OLLAMA_URL)
+        
+        payload = {
+            "model": model,
+            "messages": self.messages,
+            "stream": True,
+            "think": False,  # No thinking for action responses
+            "keep_alive": "1m"
+        }
+        
+        sentence_buffer = SentenceBuffer()
+        self.full_response = ""
+        self.think_start.emit(False)
+        
+        with http_session.post(f"{ollama_url}/api/chat", json=payload, stream=True) as r:
+            r.raise_for_status()
+            
+            for line in r.iter_lines():
+                if self.stop_event.is_set():
+                    break
+                    
+                if line:
+                    try:
+                        chunk = json.loads(line.decode('utf-8'))
+                        msg = chunk.get('message', {})
+                        
+                        if 'content' in msg and msg['content']:
+                            content = msg['content']
+                            self.full_response += content
+                            self.response_chunk.emit(content)
+                            
+                            if self.is_tts_enabled and not DEBUG_SKIP_TTS:
+                                sentences = sentence_buffer.add(content)
+                                for s in sentences:
+                                    tts.queue_sentence(s)
+                    except:
+                        continue
+        
+        self.think_end.emit()
+        
+        if self.is_tts_enabled and not DEBUG_SKIP_TTS and not self.stop_event.is_set():
+            rem = sentence_buffer.flush()
+            if rem:
+                tts.queue_sentence(rem)
+        
+        self.messages.append({'role': 'assistant', 'content': self.full_response})
+        
+        if self.current_session_id:
+            history_manager.add_message(self.current_session_id, "assistant", self.full_response)
+    
+    def _stream_qwen_response(self, enable_thinking: bool):
+        """Stream a direct Qwen response (for thinking/nonthinking)."""
+        max_hist = app_settings.get("general.max_history", MAX_HISTORY)
+        if len(self.messages) > max_hist:
+            self.messages = [self.messages[0]] + self.messages[-(max_hist-1):]
+        
+        self.messages.append({'role': 'user', 'content': self.user_text})
+        
+        self.ui_update.emit()
+        self.status.emit("Generating...")
+        
+        model = app_settings.get("models.chat", RESPONDER_MODEL)
+        ensure_exclusive_qwen(model)
+        ollama_url = app_settings.get("ollama_url", OLLAMA_URL)
+        
+        payload = {
+            "model": model,
+            "messages": self.messages,
+            "stream": True,
+            "think": enable_thinking,
+            "keep_alive": "1m"
+        }
+        
+        sentence_buffer = SentenceBuffer()
+        self.full_response = ""
+        self.think_start.emit(enable_thinking)
+
+        with http_session.post(f"{ollama_url}/api/chat", json=payload, stream=True) as r:
+            r.raise_for_status()
+            
+            for line in r.iter_lines():
+                if self.stop_event.is_set():
+                    break
+                    
+                if line:
+                    try:
+                        chunk = json.loads(line.decode('utf-8'))
+                        msg = chunk.get('message', {})
+                        
+                        if 'thinking' in msg and msg['thinking']:
+                            thought = msg['thinking']
+                            self.thought_chunk.emit(thought)
+                            
+                        if 'content' in msg and msg['content']:
+                            content = msg['content']
+                            self.full_response += content
+                            self.response_chunk.emit(content)
+                            
+                            if self.is_tts_enabled and not DEBUG_SKIP_TTS:
+                                sentences = sentence_buffer.add(content)
+                                for s in sentences:
+                                    tts.queue_sentence(s)
+                                    
+                    except:
+                        continue
+        
+        self.think_end.emit()
+        
+        if self.is_tts_enabled and not DEBUG_SKIP_TTS and not self.stop_event.is_set():
+            rem = sentence_buffer.flush()
+            if rem:
+                tts.queue_sentence(rem)
+        
+        self.messages.append({'role': 'assistant', 'content': self.full_response})
+        
+        if self.current_session_id:
+            history_manager.add_message(self.current_session_id, "assistant", self.full_response)
 
 
 class ChatHandlers(QObject):
@@ -269,6 +391,33 @@ class ChatHandlers(QObject):
         # Save simple response to history
         if self.current_session_id:
             history_manager.add_message(self.current_session_id, "assistant", text)
+    
+    def _on_toast(self, message: str, success: bool):
+        """Show toast notification for function execution result."""
+        from gui.components.toast import ToastNotification
+        ToastNotification.show_toast(self.main_window, message, success)
+    
+    def _on_set_timer(self, seconds: int, label: str):
+        """Update timer GUI when set via voice command."""
+        try:
+            # Access timer component via planner lazy tab
+            if hasattr(self.main_window, 'planner_lazy') and self.main_window.planner_lazy.actual_widget:
+                planner = self.main_window.planner_lazy.actual_widget
+                if hasattr(planner, 'timer_component'):
+                    planner.timer_component.set_and_start(seconds, label)
+        except Exception as e:
+            print(f"[Handlers] Timer update failed: {e}")
+    
+    def _on_reload_alarms(self):
+        """Reload alarms GUI when added via voice command."""
+        try:
+            # Access alarm component via planner lazy tab
+            if hasattr(self.main_window, 'planner_lazy') and self.main_window.planner_lazy.actual_widget:
+                planner = self.main_window.planner_lazy.actual_widget
+                if hasattr(planner, 'alarm_component'):
+                    planner.alarm_component.reload()
+        except Exception as e:
+            print(f"[Handlers] Alarm reload failed: {e}")
             
     def _on_error(self, text):
         self.main_window.add_message_bubble("system", f"Error: {text}", is_thinking=True)
@@ -360,6 +509,9 @@ class ChatHandlers(QObject):
         self._worker.simple_response.connect(self._on_simple_response)
         self._worker.error.connect(self._on_error)
         self._worker.status.connect(self._on_status)
+        self._worker.toast.connect(self._on_toast)
+        self._worker.set_timer_signal.connect(self._on_set_timer)
+        self._worker.reload_alarms.connect(self._on_reload_alarms)
         self._worker.done.connect(self._on_done)
         self._worker.done.connect(self._thread.quit)
         self._worker.done.connect(self._worker.deleteLater)
