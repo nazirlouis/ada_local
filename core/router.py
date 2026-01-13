@@ -11,6 +11,9 @@ import time
 import re
 import json
 
+# Debug flag - set to True to see Gemma's raw response
+DEBUG_ROUTER = True
+
 
 # --- Tool Definitions (all 9 functions) ---
 
@@ -192,6 +195,14 @@ class FunctionGemmaRouter:
         # Decode new tokens only
         new_tokens = outputs[0][inputs['input_ids'].shape[1]:]
         response = self.tokenizer.decode(new_tokens, skip_special_tokens=False)
+        
+        # Debug: Print raw Gemma response
+        if DEBUG_ROUTER:
+            print(f"\n{'='*50}")
+            print(f"[Router DEBUG] User prompt: {user_prompt}")
+            print(f"[Router DEBUG] Raw Gemma response:")
+            print(f"  {repr(response)}")
+            print(f"{'='*50}")
         
         # Parse function call
         return self._parse_function_call(response, user_prompt)
